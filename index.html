@@ -148,40 +148,71 @@ const words=[{word:"abate",partOfSpeech:"v.",definition:"to reduce, lessen",exam
 
 // Keep your existing `words` array exactly as-is above this point.
 
-const WRONG_INTERVAL = 50;    // repeat wrong cards every N cards shown
-const RIGHT_INTERVAL = 200;   // repeat correct cards every N cards shown
-const RIGHT_STREAK = 400;     // repeat after 2 consecutive correct answers
+const WRONG_INTERVAL = 50;
+const RIGHT_INTERVAL = 200;
+const RIGHT_STREAK   = 400;
 
-let deck = [];       // all cards, each: { idx, interval, dueAt, streak }
-let totalShown = 0;  // how many cards have been shown so far
-let current = null;
-let revealed = false;
+const BATCH = 20; // how many unseen cards are active at a time
+
+let deck      = [];
+let unseen    = []; // shuffled indices of cards not yet introduced
+let totalShown = 0;
+let current   = null;
+let revealed  = false;
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 
 function initDeck() {
-  const saved = localStorage.getItem('fc_state_v2');
+  const saved = localStorage.getItem('fc_state_v3');
   if (saved) {
     try {
       const s = JSON.parse(saved);
-      deck = s.deck;
+      deck       = s.deck;
+      unseen     = s.unseen;
       totalShown = s.totalShown || 0;
       showNext();
       return;
     } catch(e) {}
   }
+
+  // shuffled order for introducing new cards
+  unseen = shuffle(words.map((_, i) => i));
+
+  // start with first BATCH cards active (dueAt = 0), rest inactive (dueAt = Infinity)
   deck = words.map((_, i) => ({
-    idx: i,
-    interval: 0,   // 0 = never shown
-    dueAt: i,      // stagger initial due positions so they don't all appear at once
-    streak: 0,     // consecutive correct answers; resets to 0 on wrong
+    idx:     i,
+    dueAt:   Infinity,
+    streak:  0,
+    seen:    false,
     correct: 0,
-    wrong: 0
+    wrong:   0
   }));
+
+  // activate first batch
+  unseen.splice(0, BATCH).forEach(i => {
+    deck[i].dueAt = 0;
+  });
+
   totalShown = 0;
   showNext();
 }
 
 function saveState() {
-  localStorage.setItem('fc_state_v2', JSON.stringify({ deck, totalShown }));
+  localStorage.setItem('fc_state_v3', JSON.stringify({ deck, unseen, totalShown }));
+}
+
+// Whenever a card is answered, top up the active pool from unseen
+function topUp() {
+  const active = deck.filter(c => c.dueAt !== Infinity).length;
+  const needed = Math.max(0, BATCH - active);
+  const toAdd  = unseen.splice(0, needed);
+  toAdd.forEach(i => { deck[i].dueAt = totalShown; });
 }
 
 function getDue() {
@@ -190,18 +221,18 @@ function getDue() {
 
 function showNext() {
   revealed = false;
-  document.getElementById('back').style.display = 'none';
-  document.getElementById('hint').style.display = 'block';
+  document.getElementById('back').style.display    = 'none';
+  document.getElementById('hint').style.display    = 'block';
   document.getElementById('buttons').style.visibility = 'hidden';
   document.getElementById('next-info').textContent = '';
 
   const due = getDue();
 
   if (due.length === 0) {
-    const next = Math.min(...deck.map(c => c.dueAt));
-    const gap = next - totalShown;
-    document.getElementById('word').textContent = '—';
-    document.getElementById('pos').textContent = '';
+    const next = Math.min(...deck.filter(c => c.dueAt !== Infinity).map(c => c.dueAt));
+    const gap  = next - totalShown;
+    document.getElementById('word').textContent     = '—';
+    document.getElementById('pos').textContent      = '';
     document.getElementById('progress').textContent = 'all caught up';
     document.getElementById('next-info').textContent = `next card in ${gap} card${gap !== 1 ? 's' : ''}`;
     document.getElementById('queue-info').textContent = '';
@@ -209,28 +240,26 @@ function showNext() {
     return;
   }
 
-  // pick the most overdue card (lowest dueAt), break ties randomly
-  due.sort((a, b) => a.dueAt - b.dueAt);
-  const topDue = due[0].dueAt;
-  const tied = due.filter(c => c.dueAt === topDue);
-  current = tied[Math.floor(Math.random() * tied.length)];
+  // pick randomly among due cards (they're already random; no ordering needed)
+  current = due[Math.floor(Math.random() * due.length)];
+  current.seen = true;
 
-  const w = words[current.idx];
-  const seen = deck.filter(c => c.interval > 0).length;
+  const w    = words[current.idx];
+  const seen = deck.filter(c => c.seen).length;
 
-  document.getElementById('word').textContent = w.word;
-  document.getElementById('pos').textContent = w.partOfSpeech;
+  document.getElementById('word').textContent       = w.word;
+  document.getElementById('pos').textContent        = w.partOfSpeech;
   document.getElementById('definition').textContent = w.definition;
-  document.getElementById('example').textContent = '"' + w.example + '"';
-  document.getElementById('progress').textContent = `${seen} / ${words.length} seen`;
+  document.getElementById('example').textContent    = '"' + w.example + '"';
+  document.getElementById('progress').textContent   = `${seen} / ${words.length} seen`;
   document.getElementById('queue-info').textContent = `${due.length} due`;
 }
 
 function revealCard() {
   if (!current || revealed) return;
   revealed = true;
-  document.getElementById('back').style.display = 'block';
-  document.getElementById('hint').style.display = 'none';
+  document.getElementById('back').style.display       = 'block';
+  document.getElementById('hint').style.display       = 'none';
   document.getElementById('buttons').style.visibility = 'visible';
 }
 
@@ -242,19 +271,18 @@ function answer(correct) {
   if (correct) {
     current.correct++;
     current.streak++;
-    const interval = current.streak >= 2 ? RIGHT_STREAK : RIGHT_INTERVAL;
-    current.interval = interval;
-    current.dueAt = totalShown + interval;
-    const label = current.streak >= 2 ? `✓✓ again in ${interval} cards` : `✓ again in ${interval} cards`;
+    const interval   = current.streak >= 2 ? RIGHT_STREAK : RIGHT_INTERVAL;
+    current.dueAt    = totalShown + interval;
+    const label      = current.streak >= 2 ? `✓✓ again in ${interval} cards` : `✓ again in ${interval} cards`;
     showToast(label);
   } else {
     current.wrong++;
     current.streak = 0;
-    current.interval = current.interval === 0 ? 1 : current.interval; // mark as seen
-    current.dueAt = totalShown + WRONG_INTERVAL;
+    current.dueAt  = totalShown + WRONG_INTERVAL;
     showToast(`✗ again in ${WRONG_INTERVAL} cards`);
   }
 
+  topUp();
   saveState();
   setTimeout(showNext, 300);
 }
